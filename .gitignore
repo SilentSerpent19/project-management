@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+
+# Django
+*.log
+db.sqlite3
+media/
+staticfiles/
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+.localized
+
+# Environments
+.env
+venv/
+ENV/
+
+# Other
+*.sqlite3
+*.mwb
+*.zip
+*.pem
+*.pkg
+*.pdf
+*.csv
+
+# Ignore migrations except __init__.py
+app/migrations/*.pyc
+app/migrations/*.pyo
+app/migrations/*.pyd
+!app/migrations/__init__.py 
