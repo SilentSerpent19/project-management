@@ -5,10 +5,7 @@ from .models import CustomUser, Project, Task, Comment, Employee
 class CustomUserCreationForm(UserCreationForm):
     class Meta:
         model = CustomUser
-        fields = ("username", "email", "role", "password1", "password2")
-        widgets = {
-            "role": forms.Select(attrs={"class": "form-control"}),
-        }
+        fields = ("username", "email", "password1", "password2")
 
 class CustomAuthenticationForm(AuthenticationForm):
     class Meta:
@@ -27,17 +24,12 @@ class EmployeeForm(forms.ModelForm):
         } 
 
 class ProjectForm(forms.ModelForm):
-    def __init__(self, *args, **kwargs):
-        exclude_user = kwargs.pop('exclude_user', None)
-        super().__init__(*args, **kwargs)
-        if exclude_user is not None:
-            self.fields['employees'].queryset = Employee.objects.exclude(user=exclude_user)
+    # Project members and roles are now managed via ProjectMembership, not directly on Project
     class Meta:
         model = Project
         fields = ("name", "description", "upwork_id", "status", "employees")
         widgets = {
             "description": forms.Textarea(attrs={"rows": 3}),
-            "employees": forms.SelectMultiple(attrs={"class": "form-control"}),
         }
 
 class TaskForm(forms.ModelForm):

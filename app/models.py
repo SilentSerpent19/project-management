@@ -14,7 +14,10 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return f'{self.username} ({self.get_role_display()})'
 
-    
+    def get_role_display(self):
+        if self.is_superuser:
+            return "Admin"
+        return dict(self.ROLE_CHOICES).get(self.role, self.role)
 
 class Employee(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, related_name="employee", on_delete=models.CASCADE)

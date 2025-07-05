@@ -6,10 +6,12 @@ from .forms import CustomAuthenticationForm, CustomUserCreationForm
 from django.views.decorators.http import require_POST
 from .models import Project, Employee, Task, Comment
 from .forms import ProjectForm, TaskForm, CommentForm
-from django.http import HttpResponseForbidden
+from django.http import HttpResponseForbidden, JsonResponse
 from django.contrib import messages
 from django.utils import timezone
 from django.db.models import Q
+from django.core.paginator import Paginator
+from django.contrib.auth import update_session_auth_hash
 
 
 def register(request):
@@ -19,6 +21,7 @@ def register(request):
         form = CustomUserCreationForm(request.POST)
         if form.is_valid():
             user = form.save()
+            # Role is not set at registration; admin assigns role via Django admin
             login(request, user)
             messages.success(request, 'Account created successfully!')
             return redirect('home')
@@ -49,23 +52,38 @@ def logout_view(request):
 
 @login_required
 def home(request):
-    # Add today's date for overdue task calculations
     user = request.user
     employee = user.employee
-    
-    # Calculate in-progress tasks count
+
+    # Project counts
+    if user.is_superuser:
+        all_projects = Project.objects.all()
+    else:
+        all_projects = employee.projects.all()
+    active_projects_count = all_projects.filter(status='active').count()
+
+    # Task counts (as before)
     in_progress_count = employee.main_tasks.filter(status='in_progress').count()
-    
-    # Calculate overdue tasks count
     overdue_count = 0
     for task in employee.main_tasks.all():
         if task.due_date and task.due_date < timezone.now().date() and task.status != 'done':
             overdue_count += 1
-    
+
+    # Recent activity: show 5 most recently updated main tasks
+    recent_activity = employee.main_tasks.order_by('-updated_at')[:5]
+
+    # Recent projects: 5 most recently created projects assigned to the user
+    recent_projects = employee.projects.order_by('-created_at')[:5]
+
     context = {
         'today': timezone.now().date(),
         'in_progress_count': in_progress_count,
         'overdue_count': overdue_count,
+        'active_projects_count': active_projects_count,
+        'recent_activity': recent_activity,
+        'recent_activity_count': recent_activity.count(),
+        'recent_projects': recent_projects,
+        # add other project stats as needed
     }
     return render(request, 'home.html', context)
 
@@ -73,53 +91,108 @@ def home(request):
 def project_list(request):
     user = request.user
     employee = user.employee
-    # Both PMs and devs only see their assigned projects
-    projects = employee.projects.all()
+    # Superuser sees all projects, others see only assigned
+    if user.is_superuser:
+        projects = Project.objects.all()
+    else:
+        projects = employee.projects.all()
 
     # Apply search filter
     search_query = request.GET.get('search', '')
     if search_query:
         projects = projects.filter(
-            Q(name__icontains=search_query) |
-            Q(description__icontains=search_query)
+            Q(name__icontains=search_query) | Q(description__icontains=search_query)
         )
-    # Apply status filter
-    status_filter = request.GET.get('status', '')
-    if status_filter:
-        projects = projects.filter(status=status_filter)
-    # Calculate statistics
-    total_projects = projects.count()
-    active_projects = projects.filter(status='active').count()
-    completed_projects = projects.filter(status='completed').count()
-    on_hold_projects = projects.filter(status='on_hold').count()
+
+    # Apply sorting
+    sort_by = request.GET.get('sort', 'name')
+    if sort_by == 'created_at':
+        projects = projects.order_by('created_at')
+    elif sort_by == 'status':
+        projects = projects.order_by('status')
+    elif sort_by == 'total_tasks':
+        projects = projects.order_by('name')
+    else:  # default to name
+        projects = projects.order_by('name')
+
+    # Group projects by status and calculate stats
+    def group_stats(projects_qs):
+        total_tasks = sum(p.tasks.count() for p in projects_qs)
+        member_ids = set()
+        for p in projects_qs:
+            member_ids.update(p.employees.values_list('id', flat=True))
+        total_members = len(member_ids)
+        return total_tasks, total_members
+
+    active_projects = projects.filter(status='active')
+    draft_projects = projects.filter(status='draft')
+    completed_projects = projects.filter(status='completed')
+    archived_projects = projects.filter(status='archived')
+
+    status_groups = [
+        {
+            'label': 'Active Projects',
+            'projects': active_projects,
+            'color': 'green',
+            'icon': 'fa-bolt',
+            'status': 'active',
+            'total_tasks': group_stats(active_projects)[0],
+            'total_members': group_stats(active_projects)[1],
+        },
+        {
+            'label': 'Draft Projects',
+            'projects': draft_projects,
+            'color': 'gray',
+            'icon': 'fa-pencil-alt',
+            'status': 'draft',
+            'total_tasks': group_stats(draft_projects)[0],
+            'total_members': group_stats(draft_projects)[1],
+        },
+        {
+            'label': 'Completed Projects',
+            'projects': completed_projects,
+            'color': 'blue',
+            'icon': 'fa-check-circle',
+            'status': 'completed',
+            'total_tasks': group_stats(completed_projects)[0],
+            'total_members': group_stats(completed_projects)[1],
+        },
+        {
+            'label': 'Archived Projects',
+            'projects': archived_projects,
+            'color': 'red',
+            'icon': 'fa-archive',
+            'status': 'archived',
+            'total_tasks': group_stats(archived_projects)[0],
+            'total_members': group_stats(archived_projects)[1],
+        },
+    ]
+    # Add a flag to indicate if there are any projects in any group
+    has_projects = any(group['projects'].exists() for group in status_groups)
     context = {
-        'projects': projects,
+        'status_groups': status_groups,
         'search_query': search_query,
-        'status_filter': status_filter,
-        'total_projects': total_projects,
-        'active_projects': active_projects,
-        'completed_projects': completed_projects,
-        'on_hold_projects': on_hold_projects,
+        'has_projects': has_projects,
     }
     return render(request, 'project_list.html', context)
 
 @login_required
 def project_create(request):
     user = request.user
-    if user.role != 'pm':
+    if not (user.role == 'pm' or user.is_superuser):
         return HttpResponseForbidden('You do not have permission to create projects.')
+    employee = user.employee
     if request.method == 'POST':
-        form = ProjectForm(request.POST, exclude_user=user)
+        form = ProjectForm(request.POST)
         if form.is_valid():
             project = form.save()
-            employee = user.employee
             # Ensure the PM is always assigned to the project
             if employee not in project.employees.all():
                 project.employees.add(employee)
             messages.success(request, f'Project "{project.name}" created successfully!')
             return redirect('project_list')
     else:
-        form = ProjectForm(exclude_user=user)
+        form = ProjectForm()
     return render(request, 'project_form.html', {'form': form})
 
 @login_required
@@ -127,7 +200,7 @@ def project_edit(request, pk):
     user = request.user
     project = get_object_or_404(Project, pk=pk)
     employee = user.employee
-    if user.role != 'pm' or employee not in project.employees.all():
+    if not (user.is_superuser or (user.role == 'pm' and employee in project.employees.all())):
         return HttpResponseForbidden('You do not have permission to edit this project.')
     if request.method == 'POST':
         form = ProjectForm(request.POST, instance=project)
@@ -144,7 +217,7 @@ def project_delete(request, pk):
     user = request.user
     project = get_object_or_404(Project, pk=pk)
     employee = user.employee
-    if user.role != 'pm' or employee not in project.employees.all():
+    if not (user.is_superuser or (user.role == 'pm' and employee in project.employees.all())):
         return HttpResponseForbidden('You do not have permission to delete this project.')
     if request.method == 'POST':
         project_name = project.name
@@ -158,10 +231,10 @@ def task_list(request, project_pk):
     user = request.user
     employee = user.employee
     project = get_object_or_404(Project, pk=project_pk)
-    # Only allow access if the user is assigned to the project
-    if employee not in project.employees.all():
+    # Only allow access if the user is assigned to the project, or is superuser
+    if not (user.is_superuser or employee in project.employees.all()):
         return HttpResponseForbidden('You do not have access to this project.')
-    if user.role == 'pm':
+    if user.is_superuser or user.role == 'pm':
         tasks = project.tasks.all()
     elif user.role == 'dev':
         tasks = project.tasks.filter(
@@ -228,8 +301,8 @@ def task_create(request, project_pk):
     user = request.user
     employee = user.employee
     project = get_object_or_404(Project, pk=project_pk)
-    # Only allow PMs assigned to the project to create tasks
-    if user.role != 'pm' or employee not in project.employees.all():
+    # Only allow PMs assigned to the project or superuser to create tasks
+    if not (user.is_superuser or (user.role == 'pm' and employee in project.employees.all())):
         return HttpResponseForbidden('You do not have permission to create tasks in this project.')
     if request.method == 'POST':
         form = TaskForm(request.POST, project=project)
@@ -249,8 +322,8 @@ def task_edit(request, project_pk, task_pk):
     employee = user.employee
     project = get_object_or_404(Project, pk=project_pk)
     task = get_object_or_404(Task, pk=task_pk, project=project)
-    # Only allow PMs assigned to the project to edit tasks
-    if user.role != 'pm' or employee not in project.employees.all():
+    # Only allow PMs assigned to the project or superuser to edit tasks
+    if not (user.is_superuser or (user.role == 'pm' and employee in project.employees.all())):
         return HttpResponseForbidden('You do not have permission to edit this task.')
     if request.method == 'POST':
         form = TaskForm(request.POST, instance=task, project=project)
@@ -265,11 +338,10 @@ def task_edit(request, project_pk, task_pk):
 @login_required
 def comment_list(request, project_pk, task_pk):
     user = request.user
-    # Ensure employee object exists
     employee, created = Employee.objects.get_or_create(user=user)
     project = get_object_or_404(Project, pk=project_pk)
     task = get_object_or_404(Task, pk=task_pk, project=project)
-    if employee not in project.employees.all():
+    if not (user.is_superuser or employee in project.employees.all()):
         return HttpResponseForbidden('You do not have access to this task.')
     comments = task.comments.all().order_by('created_at')
     comment_form = CommentForm()
@@ -290,11 +362,10 @@ def comment_list(request, project_pk, task_pk):
 @login_required
 def comment_create(request, project_pk, task_pk):
     user = request.user
-    # Ensure employee object exists
     employee, created = Employee.objects.get_or_create(user=user)
     project = get_object_or_404(Project, pk=project_pk)
     task = get_object_or_404(Task, pk=task_pk, project=project)
-    if employee not in project.employees.all():
+    if not (user.is_superuser or employee in project.employees.all()):
         return HttpResponseForbidden('You do not have access to comment on this task.')
     if request.method == 'POST':
         form = CommentForm(request.POST)
@@ -319,7 +390,7 @@ def comment_edit(request, project_pk, task_pk, comment_pk):
     project = get_object_or_404(Project, pk=project_pk)
     task = get_object_or_404(Task, pk=task_pk, project=project)
     comment = get_object_or_404(task.comments, pk=comment_pk)
-    if not (employee == comment.employee or (user.role == 'pm' and employee in project.employees.all())):
+    if not (user.is_superuser or employee == comment.employee or (user.role == 'pm' and employee in project.employees.all())):
         return HttpResponseForbidden('You do not have permission to edit this comment.')
     if request.method == 'POST':
         form = CommentForm(request.POST, instance=comment)
@@ -335,8 +406,8 @@ def comment_edit(request, project_pk, task_pk, comment_pk):
 def comment_delete(request, project_pk, task_pk, comment_pk):
     user = request.user
     comment = get_object_or_404(Comment, pk=comment_pk, task__pk=task_pk, task__project__pk=project_pk)
-    # Ensure only the comment author or a project manager can delete it
-    if comment.employee.user != user and user.role != 'pm':
+    # Only the comment author, a project manager assigned, or superuser can delete
+    if not (user.is_superuser or comment.employee.user == user or (user.role == 'pm')):
         return HttpResponseForbidden('You do not have permission to delete this comment.')
     if request.method == 'POST':
         comment.delete()
@@ -345,5 +416,181 @@ def comment_delete(request, project_pk, task_pk, comment_pk):
     project = get_object_or_404(Project, pk=project_pk)
     task = get_object_or_404(Task, pk=task_pk)
     return render(request, 'comment_confirm_delete.html', {'comment': comment, 'project': project, 'task': task})
+
+@login_required
+def my_tasks(request):
+    employee = request.user.employee
+    # Active/draft tasks
+    active_statuses = ['active', 'draft']
+    main_tasks = Task.objects.filter(main_employee=employee, project__status__in=active_statuses)
+    pair_tasks = Task.objects.filter(pair_employee=employee, project__status__in=active_statuses).exclude(main_employee=employee)
+    # Completed/archived tasks
+    completed_statuses = ['completed', 'archived']
+    main_tasks_completed = Task.objects.filter(main_employee=employee, project__status__in=completed_statuses)
+    pair_tasks_completed = Task.objects.filter(pair_employee=employee, project__status__in=completed_statuses).exclude(main_employee=employee)
+    return render(request, 'my_tasks.html', {
+        'main_tasks': main_tasks,
+        'pair_tasks': pair_tasks,
+        'main_tasks_completed': main_tasks_completed,
+        'pair_tasks_completed': pair_tasks_completed,
+    })
+
+@login_required
+def update_task_status(request, project_pk, task_pk):
+    user = request.user
+    employee = user.employee
+    project = get_object_or_404(Project, pk=project_pk)
+    task = get_object_or_404(Task, pk=task_pk, project=project)
+    if not (user.is_superuser or (user.role == 'pm' and employee in project.employees.all())):
+        return JsonResponse({'error': 'Permission denied.'}, status=403)
+    if request.method == 'POST':
+        new_status = request.POST.get('status')
+        if new_status not in ['todo', 'in_progress', 'done', 'blocked']:
+            return JsonResponse({'error': 'Invalid status.'}, status=400)
+        task.status = new_status
+        task.save()
+        return JsonResponse({'success': True, 'status': new_status})
+    return JsonResponse({'error': 'Invalid request.'}, status=400)
+
+@login_required
+def project_list_by_status(request, status):
+    user = request.user
+    employee = user.employee
+    # Superuser sees all projects, others see only assigned
+    if user.is_superuser:
+        projects = Project.objects.filter(status=status)
+    else:
+        projects = employee.projects.filter(status=status)
+
+    # Apply search filter
+    search_query = request.GET.get('search', '')
+    if search_query:
+        projects = projects.filter(
+            Q(name__icontains=search_query) | Q(description__icontains=search_query)
+        )
+
+    # Smarter sort options
+    sort_by = request.GET.get('sort', 'name_asc')
+    if sort_by == 'name_asc':
+        projects = projects.order_by('name')
+    elif sort_by == 'name_desc':
+        projects = projects.order_by('-name')
+    elif sort_by == 'created_newest':
+        projects = projects.order_by('-created_at')
+    elif sort_by == 'created_oldest':
+        projects = projects.order_by('created_at')
+    elif sort_by == 'tasks_most':
+        projects = sorted(projects, key=lambda p: p.tasks.count(), reverse=True)
+    elif sort_by == 'tasks_least':
+        projects = sorted(projects, key=lambda p: p.tasks.count())
+    elif sort_by == 'members_most':
+        projects = sorted(projects, key=lambda p: p.employees.count(), reverse=True)
+    elif sort_by == 'members_least':
+        projects = sorted(projects, key=lambda p: p.employees.count())
+    else:
+        projects = projects.order_by('name')
+
+    # Get status display name and color
+    status_choices = [
+        ("draft", "Draft"),
+        ("active", "Active"),
+        ("completed", "Completed"),
+        ("archived", "Archived")
+    ]
+    status_display = dict(status_choices).get(status, status.title())
+    status_colors = {
+        'active': 'green',
+        'draft': 'gray', 
+        'completed': 'blue',
+        'archived': 'red'
+    }
+    status_color = status_colors.get(status, 'gray')
+
+    context = {
+        'projects': projects,
+        'status': status,
+        'status_display': status_display,
+        'status_color': status_color,
+        'search_query': search_query,
+        'sort_by': sort_by,
+        'filtered_count': len(projects) if isinstance(projects, list) else projects.count(),
+        'total_count': Project.objects.filter(status=status).count() if not user.is_superuser else Project.objects.filter(status=status).count(),
+    }
+    return render(request, 'project_list_by_status.html', context)
+
+@login_required
+def activity_log(request):
+    try:
+        user = request.user
+        
+        # Refresh session to prevent timeout
+        update_session_auth_hash(request, user)
+        
+        employee = user.employee
+        
+        # Get all main tasks for the user, ordered by most recent updates
+        activities = employee.main_tasks.order_by('-updated_at')
+        
+        # Apply search filter
+        search_query = request.GET.get('search', '').strip()
+        if search_query:
+            activities = activities.filter(
+                Q(name__icontains=search_query) |
+                Q(description__icontains=search_query) |
+                Q(project__name__icontains=search_query)
+            )
+        
+        # Apply project filter
+        project_filter = request.GET.get('project', '').strip()
+        if project_filter and project_filter.isdigit():
+            activities = activities.filter(project_id=int(project_filter))
+        
+        # Apply status filter
+        status_filter = request.GET.get('status', '').strip()
+        if status_filter in ['todo', 'in_progress', 'done', 'blocked']:
+            activities = activities.filter(status=status_filter)
+        
+        # Apply date filter with proper timezone handling
+        date_filter = request.GET.get('date', '').strip()
+        if date_filter == 'today':
+            activities = activities.filter(updated_at__date=timezone.now().date())
+        elif date_filter == 'week':
+            week_ago = timezone.now() - timezone.timedelta(days=7)
+            activities = activities.filter(updated_at__gte=week_ago)
+        elif date_filter == 'month':
+            month_ago = timezone.now() - timezone.timedelta(days=30)
+            activities = activities.filter(updated_at__gte=month_ago)
+        
+        # Pagination
+        paginator = Paginator(activities, 20)  # 20 activities per page
+        page_number = request.GET.get('page')
+        try:
+            page_obj = paginator.get_page(page_number)
+        except (ValueError, TypeError):
+            page_obj = paginator.get_page(1)
+        
+        # Get available projects for filter dropdown
+        available_projects = employee.projects.all().order_by('name')
+        
+        context = {
+            'page_obj': page_obj,
+            'search_query': search_query,
+            'project_filter': project_filter,
+            'status_filter': status_filter,
+            'date_filter': date_filter,
+            'available_projects': available_projects,
+            'total_activities': activities.count(),
+        }
+        return render(request, 'activity_log.html', context)
+        
+    except Exception as e:
+        # Log the error for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in activity_log view: {str(e)}")
+        
+        # Return a safe error response
+        messages.error(request, 'An error occurred while loading the activity log. Please try again.')
+        return redirect('home')
 
 

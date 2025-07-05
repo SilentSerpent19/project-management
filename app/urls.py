@@ -19,4 +19,8 @@ urlpatterns = [
     path('projects/<int:project_pk>/tasks/<int:task_pk>/comments/add/', views.comment_create, name='comment_create'),
     path('projects/<int:project_pk>/tasks/<int:task_pk>/comments/<int:comment_pk>/edit/', views.comment_edit, name='comment_edit'),
     path('projects/<int:project_pk>/tasks/<int:task_pk>/comments/<int:comment_pk>/delete/', views.comment_delete, name='comment_delete'),
+    path('my-tasks/', views.my_tasks, name='my_tasks'),
+    path('activity/', views.activity_log, name='activity_log'),
+    path('projects/<int:project_pk>/tasks/<int:task_pk>/update_status/', views.update_task_status, name='update_task_status'),
+    path('projects/status/<str:status>/', views.project_list_by_status, name='project_list_by_status'),
 ]

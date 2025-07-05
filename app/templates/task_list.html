@@ -23,8 +23,8 @@
         </div>
         {% if user.role == 'pm' %}
         <div class="mt-4 sm:mt-0">
-            <a href="{% url 'task_create' project.pk %}" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500">
-                <i class="fas fa-plus mr-2"></i>New Task
+            <a href="{% url 'task_create' project.pk %}" title="Create a new task" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition">
+                <i class="fas fa-plus mr-2"></i> New Task
             </a>
         </div>
         {% endif %}
@@ -80,12 +80,11 @@
 
     <!-- Filters -->
     <div class="bg-white rounded-lg shadow p-6" x-data="{ 
-        search: '', 
         assigneeFilter: 'all',
         priorityFilter: 'all',
         viewMode: 'kanban'
     }">
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <form method="get" class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-0">
             <!-- Search -->
             <div class="relative">
                 <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -93,7 +92,8 @@
                 </div>
                 <input 
                     type="text" 
-                    x-model="search"
+                    name="search"
+                    value="{{ search_query|default:'' }}"
                     placeholder="Search tasks..." 
                     class="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md leading-5 bg-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-primary-500 focus:border-primary-500"
                 >
@@ -143,13 +143,66 @@
                     <i class="fas fa-list mr-1"></i>List
                 </button>
             </div>
-        </div>
+        </form>
     </div>
 
     <!-- Kanban Board -->
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Only enable drag-and-drop for PMs and superusers
+        const isPM = {% if user.role == 'pm' %}true{% else %}false{% endif %};
+        const isSuperuser = {% if user.is_superuser %}true{% else %}false{% endif %};
+        if (!(isPM || isSuperuser)) return;
+        // Make task cards draggable
+        document.querySelectorAll('.task-card').forEach(card => {
+            card.setAttribute('draggable', 'true');
+            card.addEventListener('dragstart', function(e) {
+                e.dataTransfer.setData('text/plain', card.dataset.taskId);
+                card.classList.add('opacity-50');
+            });
+            card.addEventListener('dragend', function(e) {
+                card.classList.remove('opacity-50');
+            });
+        });
+        // Make columns droppable
+        document.querySelectorAll('[data-status-column]').forEach(col => {
+            col.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                col.classList.add('ring', 'ring-primary-500');
+            });
+            col.addEventListener('dragleave', function(e) {
+                col.classList.remove('ring', 'ring-primary-500');
+            });
+            col.addEventListener('drop', function(e) {
+                e.preventDefault();
+                col.classList.remove('ring', 'ring-primary-500');
+                const taskId = e.dataTransfer.getData('text/plain');
+                const newStatus = col.dataset.statusColumn;
+                const projectId = {{ project.pk }};
+                fetch(`/projects/${projectId}/tasks/${taskId}/update_status/`, {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `status=${newStatus}`
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        window.location.reload();
+                    } else {
+                        alert(data.error || 'Failed to update status.');
+                    }
+                });
+            });
+        });
+    });
+    </script>
+    <form method="post" style="display:none;">{% csrf_token %}</form>
     <div x-show="viewMode === 'kanban'" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <!-- To Do Column -->
-        <div class="bg-gray-50 rounded-lg p-4">
+        <div class="bg-gray-50 rounded-lg p-4" data-status-column="todo">
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-lg font-semibold text-gray-900">To Do</h3>
                 <span class="bg-gray-200 text-gray-700 text-xs font-medium px-2 py-1 rounded-full">
@@ -161,6 +214,7 @@
                 {% if task.status == 'todo' %}
                 <div 
                     class="task-card bg-white rounded-lg shadow p-4 cursor-move"
+                    data-task-id="{{ task.pk }}"
                     x-show="
                         (search === '' || '{{ task.name|lower }}'.includes(search.toLowerCase()) || '{{ task.description|lower }}'.includes(search.toLowerCase())) &&
                         (assigneeFilter === 'all' || assigneeFilter === '{{ task.main_employee.user.username }}') &&
@@ -168,19 +222,15 @@
                     "
                 >
                     <div class="priority-{{ task.priority }} border-l-4 pl-3">
-                        <div class="flex items-start justify-between mb-2">
-                            <h4 class="font-medium text-gray-900 text-sm">{{ task.name }}</h4>
-                            <div class="flex items-center space-x-1">
+                        <div class="flex items-start justify-between mb-2 min-w-0">
+                            <h4 class="font-medium text-gray-900 text-sm truncate max-w-[70%]">{{ task.name }}</h4>
+                            <div class="flex items-center space-x-1 flex-shrink-0">
                                 {% if user.role == 'pm' %}
                                 <a href="{% url 'task_edit' project.pk task.pk %}" class="text-gray-400 hover:text-gray-600">
                                     <i class="fas fa-edit text-xs"></i>
                                 </a>
                                 {% endif %}
-                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium
-                                    {% if task.priority == 'critical' %}bg-red-100 text-red-800
-                                    {% elif task.priority == 'high' %}bg-orange-100 text-orange-800
-                                    {% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800
-                                    {% else %}bg-green-100 text-green-800{% endif %}">
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap max-w-[90px] overflow-hidden text-ellipsis flex-shrink-0 {% if task.priority == 'critical' %}bg-red-100 text-red-800{% elif task.priority == 'high' %}bg-orange-100 text-orange-800{% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800{% else %}bg-green-100 text-green-800{% endif %}" style="text-overflow: ellipsis;">
                                     {{ task.get_priority_display }}
                                 </span>
                             </div>
@@ -213,7 +263,7 @@
         </div>
 
         <!-- In Progress Column -->
-        <div class="bg-gray-50 rounded-lg p-4">
+        <div class="bg-gray-50 rounded-lg p-4" data-status-column="in_progress">
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-lg font-semibold text-gray-900">In Progress</h3>
                 <span class="bg-blue-200 text-blue-700 text-xs font-medium px-2 py-1 rounded-full">
@@ -225,6 +275,7 @@
                 {% if task.status == 'in_progress' %}
                 <div 
                     class="task-card bg-white rounded-lg shadow p-4 cursor-move"
+                    data-task-id="{{ task.pk }}"
                     x-show="
                         (search === '' || '{{ task.name|lower }}'.includes(search.toLowerCase()) || '{{ task.description|lower }}'.includes(search.toLowerCase())) &&
                         (assigneeFilter === 'all' || assigneeFilter === '{{ task.main_employee.user.username }}') &&
@@ -232,19 +283,15 @@
                     "
                 >
                     <div class="priority-{{ task.priority }} border-l-4 pl-3">
-                        <div class="flex items-start justify-between mb-2">
-                            <h4 class="font-medium text-gray-900 text-sm">{{ task.name }}</h4>
-                            <div class="flex items-center space-x-1">
+                        <div class="flex items-start justify-between mb-2 min-w-0">
+                            <h4 class="font-medium text-gray-900 text-sm truncate max-w-[70%]">{{ task.name }}</h4>
+                            <div class="flex items-center space-x-1 flex-shrink-0">
                                 {% if user.role == 'pm' %}
                                 <a href="{% url 'task_edit' project.pk task.pk %}" class="text-gray-400 hover:text-gray-600">
                                     <i class="fas fa-edit text-xs"></i>
                                 </a>
                                 {% endif %}
-                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium
-                                    {% if task.priority == 'critical' %}bg-red-100 text-red-800
-                                    {% elif task.priority == 'high' %}bg-orange-100 text-orange-800
-                                    {% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800
-                                    {% else %}bg-green-100 text-green-800{% endif %}">
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap max-w-[90px] overflow-hidden text-ellipsis flex-shrink-0 {% if task.priority == 'critical' %}bg-red-100 text-red-800{% elif task.priority == 'high' %}bg-orange-100 text-orange-800{% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800{% else %}bg-green-100 text-green-800{% endif %}" style="text-overflow: ellipsis;">
                                     {{ task.get_priority_display }}
                                 </span>
                             </div>
@@ -277,7 +324,7 @@
         </div>
 
         <!-- Done Column -->
-        <div class="bg-gray-50 rounded-lg p-4">
+        <div class="bg-gray-50 rounded-lg p-4" data-status-column="done">
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-lg font-semibold text-gray-900">Done</h3>
                 <span class="bg-green-200 text-green-700 text-xs font-medium px-2 py-1 rounded-full">
@@ -289,6 +336,7 @@
                 {% if task.status == 'done' %}
                 <div 
                     class="task-card bg-white rounded-lg shadow p-4 cursor-move"
+                    data-task-id="{{ task.pk }}"
                     x-show="
                         (search === '' || '{{ task.name|lower }}'.includes(search.toLowerCase()) || '{{ task.description|lower }}'.includes(search.toLowerCase())) &&
                         (assigneeFilter === 'all' || assigneeFilter === '{{ task.main_employee.user.username }}') &&
@@ -296,19 +344,15 @@
                     "
                 >
                     <div class="priority-{{ task.priority }} border-l-4 pl-3">
-                        <div class="flex items-start justify-between mb-2">
-                            <h4 class="font-medium text-gray-900 text-sm">{{ task.name }}</h4>
-                            <div class="flex items-center space-x-1">
+                        <div class="flex items-start justify-between mb-2 min-w-0">
+                            <h4 class="font-medium text-gray-900 text-sm truncate max-w-[70%]">{{ task.name }}</h4>
+                            <div class="flex items-center space-x-1 flex-shrink-0">
                                 {% if user.role == 'pm' %}
                                 <a href="{% url 'task_edit' project.pk task.pk %}" class="text-gray-400 hover:text-gray-600">
                                     <i class="fas fa-edit text-xs"></i>
                                 </a>
                                 {% endif %}
-                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium
-                                    {% if task.priority == 'critical' %}bg-red-100 text-red-800
-                                    {% elif task.priority == 'high' %}bg-orange-100 text-orange-800
-                                    {% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800
-                                    {% else %}bg-green-100 text-green-800{% endif %}">
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap max-w-[90px] overflow-hidden text-ellipsis flex-shrink-0 {% if task.priority == 'critical' %}bg-red-100 text-red-800{% elif task.priority == 'high' %}bg-orange-100 text-orange-800{% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800{% else %}bg-green-100 text-green-800{% endif %}" style="text-overflow: ellipsis;">
                                     {{ task.get_priority_display }}
                                 </span>
                             </div>
@@ -341,7 +385,7 @@
         </div>
 
         <!-- Blocked Column -->
-        <div class="bg-gray-50 rounded-lg p-4">
+        <div class="bg-gray-50 rounded-lg p-4" data-status-column="blocked">
             <div class="flex items-center justify-between mb-4">
                 <h3 class="text-lg font-semibold text-gray-900">Blocked</h3>
                 <span class="bg-red-200 text-red-700 text-xs font-medium px-2 py-1 rounded-full">
@@ -353,6 +397,7 @@
                 {% if task.status == 'blocked' %}
                 <div 
                     class="task-card bg-white rounded-lg shadow p-4 cursor-move"
+                    data-task-id="{{ task.pk }}"
                     x-show="
                         (search === '' || '{{ task.name|lower }}'.includes(search.toLowerCase()) || '{{ task.description|lower }}'.includes(search.toLowerCase())) &&
                         (assigneeFilter === 'all' || assigneeFilter === '{{ task.main_employee.user.username }}') &&
@@ -360,19 +405,15 @@
                     "
                 >
                     <div class="priority-{{ task.priority }} border-l-4 pl-3">
-                        <div class="flex items-start justify-between mb-2">
-                            <h4 class="font-medium text-gray-900 text-sm">{{ task.name }}</h4>
-                            <div class="flex items-center space-x-1">
+                        <div class="flex items-start justify-between mb-2 min-w-0">
+                            <h4 class="font-medium text-gray-900 text-sm truncate max-w-[70%]">{{ task.name }}</h4>
+                            <div class="flex items-center space-x-1 flex-shrink-0">
                                 {% if user.role == 'pm' %}
                                 <a href="{% url 'task_edit' project.pk task.pk %}" class="text-gray-400 hover:text-gray-600">
                                     <i class="fas fa-edit text-xs"></i>
                                 </a>
                                 {% endif %}
-                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium
-                                    {% if task.priority == 'critical' %}bg-red-100 text-red-800
-                                    {% elif task.priority == 'high' %}bg-orange-100 text-orange-800
-                                    {% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800
-                                    {% else %}bg-green-100 text-green-800{% endif %}">
+                                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap max-w-[90px] overflow-hidden text-ellipsis flex-shrink-0 {% if task.priority == 'critical' %}bg-red-100 text-red-800{% elif task.priority == 'high' %}bg-orange-100 text-orange-800{% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800{% else %}bg-green-100 text-green-800{% endif %}" style="text-overflow: ellipsis;">
                                     {{ task.get_priority_display }}
                                 </span>
                             </div>
